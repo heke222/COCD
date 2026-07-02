@@ -36,8 +36,15 @@ PRETRAINED_MODEL = "bert-base-chinese"
 OUTPUT_DIR = "./outputs/bert_odor_mlm"
 
 # Tokenization and MLM parameters
-MAX_SEQ_LENGTH = 128
-MLM_PROBABILITY = 0.15
+MAX_SEQ_LENGTH = 128          # Table: 128
+MLM_PROBABILITY = 0.15        # Table: 0.15
+
+# Training hyperparameters (from table)
+LEARNING_RATE = 2e-5
+TOTAL_BATCH_SIZE = 1024       # Effective batch size after gradient accumulation
+PER_DEVICE_BATCH_SIZE = 64    # Adjust based on GPU memory
+GRADIENT_ACCUMULATION_STEPS = TOTAL_BATCH_SIZE // PER_DEVICE_BATCH_SIZE  # =16
+NUM_EPOCHS = 16
 
 
 # ============================================================
@@ -73,7 +80,7 @@ if len(sentences) == 0:
 
 
 # ============================================================
-# Step 2: Build HuggingFace Dataset
+# Step 2: Build HuggingFace Dataset and split 9:1
 # ============================================================
 
 dataset = Dataset.from_dict({"text": sentences})
@@ -94,6 +101,12 @@ dataset = dataset.map(
     remove_columns=["text"]
 )
 
+# Split into train (90%) and validation (10%)
+split_dataset = dataset.train_test_split(test_size=0.1, seed=42)
+train_dataset = split_dataset["train"]
+eval_dataset = split_dataset["test"]
+print(f"Train size: {len(train_dataset)}, Validation size: {len(eval_dataset)}")
+
 
 # ============================================================
 # Step 3: Data collator for MLM
@@ -107,35 +120,53 @@ data_collator = DataCollatorForLanguageModeling(
 
 
 # ============================================================
-# Step 4: Training configuration
+# Step 4: Training configuration with hyperparameters
 # ============================================================
 
 training_args = TrainingArguments(
     output_dir=OUTPUT_DIR,
     overwrite_output_dir=True,
-    num_train_epochs=6,
-    per_device_train_batch_size=16,
+
+    # Hyperparameters from table
+    learning_rate=LEARNING_RATE,
+    per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
+    gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
+    num_train_epochs=NUM_EPOCHS,
+    optim="adamw_torch",          # AdamW optimizer
+
+    # Evaluation settings (evaluate on validation loss)
+    evaluation_strategy="steps",
+    eval_steps=500,               # Evaluate every 500 steps
+    save_steps=500,               # Save checkpoint every 500 steps
+    load_best_model_at_end=True,
+    metric_for_best_model="eval_loss",
+    greater_is_better=False,
+
+    # Logging and saving
     logging_steps=100,
-    save_steps=2000,
     save_total_limit=2,
-    report_to="none"
+    report_to="none",             # Disable external logging (optional)
+    seed=42,
 )
+
+# Detect device
+device = "GPU" if torch.cuda.is_available() else "CPU"
+print(f"Training device: {device}")
+print(f"Effective batch size: {PER_DEVICE_BATCH_SIZE} * {GRADIENT_ACCUMULATION_STEPS} = {TOTAL_BATCH_SIZE}")
 
 model = BertForMaskedLM.from_pretrained(PRETRAINED_MODEL)
 
-device = "GPU" if torch.cuda.is_available() else "CPU"
-print(f"Training device: {device}")
-
 
 # ============================================================
-# Step 5: Train MLM model
+# Step 5: Train MLM model with evaluation
 # ============================================================
 
 trainer = Trainer(
     model=model,
     args=training_args,
-    train_dataset=dataset,
-    data_collator=data_collator
+    train_dataset=train_dataset,
+    eval_dataset=eval_dataset,      # Provide validation set
+    data_collator=data_collator,
 )
 
 trainer.train()
